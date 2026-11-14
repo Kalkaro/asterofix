@@ -1,6 +1,6 @@
 [package]
 name = "asterofix"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 description = "Launch Steam Fix / Online Fix games through Proton with the Steam overlay"
