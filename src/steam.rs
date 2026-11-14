@@ -179,11 +179,30 @@ pub fn steam_running() -> bool {
 
 /// The PID of the running Steam client binary, or 0.
 pub fn steam_client_pid() -> i32 {
-    steam_pids()
-        .find(|pid| {
-            std::fs::read_link(format!("/proc/{pid}/exe"))
-                .is_ok_and(|exe| exe.to_string_lossy().contains("ubuntu12_32/steam"))
+    client_pid(steam_pids().map(|pid| {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default();
+        let ppid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| s.lines().find_map(|l| l.strip_prefix("PPid:")?.trim().parse::<i32>().ok()))
+            .unwrap_or(0);
+        let parent = std::fs::read_to_string(format!("/proc/{ppid}/comm")).unwrap_or_default();
+        (pid, exe, parent.trim().to_string())
+    }))
+}
+
+/// The Steam client among processes named steam, each with its executable and its parent's
+/// name. The 32-bit client is ubuntu12_32/steam, the 64-bit one steamrt64/steam; anything
+/// else (NixOS's steam wrapper script) isn't the client. The 64-bit client runs itself again
+/// inside a pressure-vessel container (under pv-adverb), whose /usr is the Steam Runtime's,
+/// so games join the outer one.
+fn client_pid(procs: impl Iterator<Item = (i32, PathBuf, String)>) -> i32 {
+    procs
+        .filter(|(_, exe, parent)| {
+            let exe = exe.to_string_lossy();
+            (exe.ends_with("/ubuntu12_32/steam") || exe.ends_with("/steamrt64/steam")) && parent != "pv-adverb"
         })
+        .map(|(pid, ..)| pid)
+        .next()
         .unwrap_or(0)
 }
 
@@ -307,6 +326,30 @@ mod tests {
         assert!(namespace_flags(|_| false).is_empty());
         assert_eq!(namespace_wrapper(std::process::id() as i32), None, "our own process needs no wrapper");
         assert_eq!(namespace_wrapper(0), None, "no Steam needs no wrapper");
+    }
+
+    /// Steam's 64-bit client is steamrt64/steam. Only the 32-bit ubuntu12_32/steam was
+    /// known, so with it running games fell back to steam-run outside Steam's sandbox, where
+    /// a Unity game couldn't create a DXGI factory and crashed. Its second copy inside
+    /// pressure-vessel's container isn't the one to join.
+    #[test]
+    fn finds_the_32_and_64_bit_steam_clients() {
+        let root = "/home/u/.local/share/Steam";
+        let proc = |pid, exe: &str, parent: &str| (pid, PathBuf::from(exe), parent.to_string());
+        let wrapper = proc(10, "/nix/store/abc-bash-5.2/bin/bash", "fish");
+        assert_eq!(client_pid([wrapper.clone(), proc(20, &format!("{root}/ubuntu12_32/steam"), "bash")].into_iter()), 20);
+        assert_eq!(
+            client_pid(
+                [
+                    wrapper.clone(),
+                    proc(30, &format!("{root}/steamrt64/steam"), "pv-adverb"),
+                    proc(40, &format!("{root}/steamrt64/steam"), "bash"),
+                ]
+                .into_iter()
+            ),
+            40
+        );
+        assert_eq!(client_pid([wrapper, proc(50, "", "bash")].into_iter()), 0, "no client, or its exe unreadable");
     }
 
     #[test]
